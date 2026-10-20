@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>U.S. Flight Network Explorer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 0; background: #f5f5f7; color: #222; }
+  header { background: #1f4e79; color: white; padding: 16px 24px; }
+  header h1 { margin: 0; font-size: 22px; }
+  header p { margin: 4px 0 0; font-size: 13px; opacity: 0.9; }
+  main { display: grid; grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; gap: 12px; padding: 12px; height: calc(100vh - 70px); }
+  .panel { background: white; border-radius: 8px; padding: 14px; overflow: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .panel h2 { margin: 0 0 8px; font-size: 15px; color: #1f4e79; border-bottom: 1px solid #e0e0e0; padding-bottom: 6px; }
+  .panel .letter { background: #e63946; color: white; padding: 2px 7px; border-radius: 4px; font-size: 11px; margin-right: 6px; }
+  #mapPanel { grid-row: span 2; padding: 0; overflow: hidden; }
+  #mapHeader { padding: 14px; border-bottom: 1px solid #e0e0e0; }
+  #map { height: calc(100% - 56px); }
+  #aboutPanel { grid-column: span 2; padding: 10px 14px; max-height: 120px; }
+  input, select, button { font-size: 13px; padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }
+  button { background: #1f4e79; color: white; border: none; cursor: pointer; }
+  button:hover { background: #163960; }
+  .stat { display: inline-block; margin-right: 14px; font-size: 13px; }
+  .stat b { color: #1f4e79; font-size: 15px; }
+  .bar { background: #e63946; height: 16px; margin: 2px 0; border-radius: 2px; display: inline-block; vertical-align: middle; }
+  .hub-row { font-size: 12px; margin: 2px 0; cursor: pointer; }
+  .hub-row:hover { background: #f0f0f0; }
+  .result { background: #f8f9fa; padding: 8px; border-radius: 4px; margin-top: 8px; font-size: 13px; line-height: 1.4; }
+  .success { color: #198754; font-weight: 600; }
+  .fail { color: #dc3545; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>U.S. Flight Network Explorer</h1>
+  <p>FSU ISC4221 Lab 7B · OpenFlights 2014 · Luna Garcia</p>
+</header>
+<main>
+  <div id="mapPanel" class="panel">
+    <div id="mapHeader">
+      <h2><span class="letter">A</span>Network map</h2>
+      <small>Each dot is an airport, sized by number of direct routes. Click to see details.</small>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="letter">B</span>Airport lookup</h2>
+    <input id="lookupInput" placeholder="e.g. TLH" maxlength="3" style="text-transform:uppercase;width:100px"/>
+    <button onclick="lookup()">Search</button>
+    <div id="lookupResult" class="result" style="display:none"></div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="letter">C</span>Network summary</h2>
+    <div id="summary"></div>
+    <div style="margin-top:10px"><b style="font-size:13px">Top 10 hubs:</b></div>
+    <div id="hubBars"></div>
+    <div style="margin-top:10px"><b style="font-size:13px">Components:</b></div>
+    <div id="compList"></div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="letter">D</span>Connection checker</h2>
+    From: <select id="fromAirport"></select><br/>
+    To: <select id="toAirport" style="margin-top:4px"></select>
+    <button onclick="checkPath()" style="margin-left:4px">Check</button>
+    <div id="pathResult" class="result" style="display:none"></div>
+  </div>
+
+  <div id="aboutPanel" class="panel">
+    <h2><span class="letter">E</span>About the data</h2>
+    <p style="margin:4px 0;font-size:12px;line-height:1.4">
+      Source: <a href="https://openflights.org/data.html">OpenFlights</a> database, released under the Open Database License.
+      Route data is a 2014 snapshot of scheduled airline routes between airports with 3-letter IATA codes in the U.S.
+      Showing <b>549</b> airports and <b>2,787</b> undirected edges. Panel D runs the connection algorithm in-browser (JavaScript port of path_exists).
+    </p>
+  </div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="data.js"></script>
+<script>
+const neighbors = {};
+for (const [a, b] of EDGES) {
+  if (!neighbors[a]) neighbors[a] = [];
+  if (!neighbors[b]) neighbors[b] = [];
+  neighbors[a].push(b);
+  neighbors[b].push(a);
+}
+const SORTED_CODES = Object.keys(AIRPORTS).sort();
+
+function findAirport(code) {
+  let low = 0, high = SORTED_CODES.length - 1, nc = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    nc++;
+    if (SORTED_CODES[mid] === code) return { index: mid, nc };
+    else if (SORTED_CODES[mid] < code) low = mid + 1;
+    else high = mid - 1;
+  }
+  return { index: -1, nc };
+}
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return R * 2 * Math.asin(Math.sqrt(a));
+}
+
+function pathExists(origin, destination) {
+  if (!neighbors[origin] || !neighbors[destination]) return { found: false, iterations: 0, visited: new Set() };
+  let used = new Set();
+  let newSet = new Set([origin]);
+  let untouched = new Set(Object.keys(AIRPORTS));
+  untouched.delete(origin);
+  let distance = { [origin]: 0 };
+  let iter = 0;
+  while (newSet.size > 0) {
+    if (newSet.has(destination)) {
+      for (const v of newSet) used.add(v);
+      return { found: true, iterations: iter, minFlights: distance[destination], visited: used };
+    }
+    iter++;
+    const next = new Set();
+    for (const a of newSet) {
+      for (const nb of neighbors[a]) {
+        if (untouched.has(nb)) {
+          next.add(nb);
+          untouched.delete(nb);
+          distance[nb] = iter;
+        }
+      }
+    }
+    for (const v of newSet) used.add(v);
+    newSet = next;
+  }
+  return { found: false, iterations: iter, visited: used };
+}
+
+const map = L.map('map', { preferCanvas: true }).setView([39.5, -98.35], 4);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap, © CartoDB',
+  subdomains: 'abcd', maxZoom: 10
+}).addTo(map);
+
+const edgeLayer = L.layerGroup().addTo(map);
+for (const [a, b] of EDGES) {
+  const A = AIRPORTS[a], B = AIRPORTS[b];
+  L.polyline([[A.lat, A.lon], [B.lat, B.lon]], { color: '#1f4e79', weight: 0.5, opacity: 0.12 }).addTo(edgeLayer);
+}
+
+const markerLayer = L.layerGroup().addTo(map);
+for (const code in AIRPORTS) {
+  const a = AIRPORTS[code];
+  const m = L.circleMarker([a.lat, a.lon], {
+    radius: Math.max(2, Math.sqrt(a.deg) * 0.8),
+    fillColor: '#1f4e79', color: 'white', weight: 0.5, fillOpacity: 0.75
+  }).bindTooltip(`${code} (deg ${a.deg})`);
+  m.on('click', () => { document.getElementById('lookupInput').value = code; lookup(); });
+  m.addTo(markerLayer);
+}
+
+let highlightLayer = L.layerGroup().addTo(map);
+function clearHighlight() { highlightLayer.clearLayers(); }
+
+function highlightAirport(code) {
+  clearHighlight();
+  const a = AIRPORTS[code]; if (!a) return;
+  L.circleMarker([a.lat, a.lon], { radius: 10, color: '#e63946', weight: 2, fillOpacity: 0 }).addTo(highlightLayer);
+  for (const nb of neighbors[code] || []) {
+    const B = AIRPORTS[nb];
+    L.polyline([[a.lat, a.lon], [B.lat, B.lon]], { color: '#e63946', weight: 1.5, opacity: 0.9 }).addTo(highlightLayer);
+  }
+  map.panTo([a.lat, a.lon]);
+}
+
+function highlightSet(codes) {
+  clearHighlight();
+  for (const code of codes) {
+    const a = AIRPORTS[code]; if (!a) continue;
+    L.circleMarker([a.lat, a.lon], { radius: 6, color: '#e63946', fillColor: '#e63946', weight: 1, fillOpacity: 0.7 }).addTo(highlightLayer);
+  }
+}
+
+function lookup() {
+  const code = document.getElementById('lookupInput').value.trim().toUpperCase();
+  const resEl = document.getElementById('lookupResult');
+  resEl.style.display = 'block';
+  if (!code) { resEl.innerHTML = 'Please enter a 3-letter code.'; return; }
+  const { index, nc } = findAirport(code);
+  if (index === -1) {
+    resEl.innerHTML = `<span class="fail">${code} not found</span> in the network.<br/>Binary search: <b>${nc}</b> comparisons.`;
+    clearHighlight(); return;
+  }
+  const a = AIRPORTS[code];
+  const nbrs = (neighbors[code] || []).slice().sort();
+  const dists = [];
+  for (const c in AIRPORTS) {
+    if (c === code) continue;
+    const other = AIRPORTS[c];
+    dists.push([c, haversine(a.lat, a.lon, other.lat, other.lon)]);
+  }
+  dists.sort((x, y) => x[1] - y[1]);
+  const nearest = dists.slice(0, 5);
+  resEl.innerHTML = `
+    <span class="success">${code}</span> — ${a.name}, ${a.city}<br/>
+    Degree: <b>${a.deg}</b> · Binary search: <b>${nc}</b> comparisons<br/>
+    <b>Direct destinations (${nbrs.length}):</b> ${nbrs.join(', ')}<br/>
+    <b>5 nearest airports:</b><br/>
+    ${nearest.map(([c, d]) => `&nbsp;&nbsp;${c} — ${d.toFixed(1)} km (${AIRPORTS[c].city})`).join('<br/>')}
+  `;
+  highlightAirport(code);
+}
+document.getElementById('lookupInput').addEventListener('keypress', e => { if (e.key === 'Enter') lookup(); });
+
+document.getElementById('summary').innerHTML = `
+  <div class="stat"><b>${Object.keys(AIRPORTS).length}</b> airports</div>
+  <div class="stat"><b>${EDGES.length}</b> edges</div>
+  <div class="stat"><b>${COMPONENTS.length}</b> components</div>
+`;
+const maxDeg = HUBS[0].deg;
+for (const h of HUBS) {
+  const w = (h.deg / maxDeg * 140).toFixed(0);
+  const row = document.createElement('div');
+  row.className = 'hub-row';
+  row.innerHTML = `<b>${h.code}</b> <span class="bar" style="width:${w}px"></span> ${h.deg} <small>${h.city}</small>`;
+  row.onclick = () => { document.getElementById('lookupInput').value = h.code; lookup(); };
+  document.getElementById('hubBars').appendChild(row);
+}
+COMPONENTS.forEach((c, i) => {
+  const row = document.createElement('div');
+  row.className = 'hub-row';
+  row.innerHTML = `Component ${i+1}: ${c.length} airports` + (c.length <= 10 ? ` <small>(${c.join(', ')})</small>` : '');
+  row.onclick = () => highlightSet(c);
+  document.getElementById('compList').appendChild(row);
+});
+
+const fromSel = document.getElementById('fromAirport');
+const toSel = document.getElementById('toAirport');
+for (const code of SORTED_CODES) {
+  const o1 = document.createElement('option'); o1.value = code; o1.text = `${code} — ${AIRPORTS[code].city}`; fromSel.appendChild(o1);
+  const o2 = o1.cloneNode(true); toSel.appendChild(o2);
+}
+fromSel.value = 'TLH'; toSel.value = 'SEA';
+
+function checkPath() {
+  const o = fromSel.value, d = toSel.value;
+  const resEl = document.getElementById('pathResult');
+  resEl.style.display = 'block';
+  const { found, iterations, minFlights, visited } = pathExists(o, d);
+  if (found) {
+    resEl.innerHTML = `<span class="success">Path exists</span> from <b>${o}</b> to <b>${d}</b>.<br/>Iterations: <b>${iterations}</b> · Fewest flights: <b>${minFlights}</b>`;
+  } else {
+    resEl.innerHTML = `<span class="fail">No path</span> from <b>${o}</b> to <b>${d}</b>.<br/>Iterations before giving up: <b>${iterations}</b>`;
+  }
+  highlightSet(Array.from(visited));
+}
+</script>
+</body>
+</html>
